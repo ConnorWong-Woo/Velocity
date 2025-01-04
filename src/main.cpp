@@ -2,54 +2,68 @@
 #include "lemlib/api.hpp" // IWYU pragma: keep
 #include "lemlib/timer.hpp"
 
+// forward-declaring auton funcs
+void turn90();
+void redSoloAWP();
+void blueSoloAWP();
+void oldRedSoloAWP();
+void PDtune();
+
+// PID constants
+double vertKp = 0;
+double vertKd = 0;
+double horizKp = 0;
+double horizKd = 0;
+double thetaKp = 0;
+double thetaKd = 0;
 
 // controller
 pros::Controller controller(pros::E_CONTROLLER_MASTER);
 
 // motor groups
-pros::MotorGroup leftMotors({19,20},
-                            pros::MotorGearset::blue); // left motor group - ports 3 (reversed), 4, 5 (reversed)
-pros::MotorGroup rightMotors({16,17}, pros::MotorGearset::blue); // right motor group - ports 6, 7, 9 (reversed)
+pros::MotorGroup leftMotors({19,20}, pros::MotorGearset::green); // left motor group - ports 3 (reversed), 4, 5 (reversed)
+pros::MotorGroup rightMotors({16,17}, pros::MotorGearset::green); // right motor group - ports 6, 7, 9 (reversed)
 
 // Inertial Sensor on port 10
 pros::Imu imu(4);
 pros::Motor leftTop(19);
 pros::Motor leftBottom(16); 
-pros::Motor rightTop(-20);
+pros::Motor rightTop(-3);
 pros::Motor rightBottom(-17);
-pros::ADIDigitalOut piston ('A');
+pros::ADIDigitalOut clamp ('A');
+pros::ADIDigitalOut didler ('B');
 
 pros::Motor intake1(-14);
 pros::Motor intake2(-12);
-pros::Motor    intake(8);
+pros::Motor intake(8);
 
-void arcadecontrolx(double angular, double vertical, double horizontal)
+void holonomicDrive(double angular, double vertical, double horizontal)
 {
 	leftTop.move(vertical+angular+horizontal);
 	leftBottom.move(vertical+angular-horizontal);
 	rightBottom.move(vertical-angular+horizontal);
 	rightTop.move(vertical-angular-horizontal);
-
 }
+
 // tracking wheels
 // horizontal tracking wheel encoder. Rotation sensor, port 20, not reversed
 pros::Rotation horizontalEnc(-21);
 // vertical tracking wheel encoder. Rotation sensor, port 11, reversed
-pros::Rotation verticalEnc(-11);
-pros::Rotation verticalEn2c(18);
+pros::Rotation verticalEnc(15);
+pros::Rotation verticalEnc2(-18);
 // horizontal tracking wheel. 2.75" diameter, 5.75" offset, back of the robot (negative)
-lemlib::TrackingWheel horizontal(&horizontalEnc, lemlib::Omniwheel::NEW_275, 3.5);
+lemlib::TrackingWheel horizontal(&horizontalEnc, lemlib::Omniwheel::NEW_275, 1);
 // vertical tracking wheel. 2.75" diameter, 2.5" offset, left of the robot (negative)
-lemlib::TrackingWheel vertical(&verticalEnc, lemlib::Omniwheel::NEW_275, 6.75);
-lemlib::TrackingWheel vertical2(&verticalEn2c, lemlib::Omniwheel::NEW_275, -6.75);
+lemlib::TrackingWheel vertical(&verticalEnc, lemlib::Omniwheel::NEW_275, 1);
+lemlib::TrackingWheel vertical2(&verticalEnc2, lemlib::Omniwheel::NEW_275, -1);
 
 // drivetrain settings
 lemlib::Drivetrain drivetrain(&leftMotors, // left motor group
                               &rightMotors, // right motor group
-                              10, // 10 inch track width
-                              lemlib::Omniwheel::NEW_4, // using new 4" omnis
-                              360, // drivetrain rpm is 360
-                              2 // horizontal drift is 2. If we had traction wheels, it would have been 8
+                              15, // 15 inch track width
+                              lemlib::Omniwheel::NEW_275, // using new 2.75" omnis
+                              333, // drivetrain rpm is 200
+                              5 // horizontal drift: 2 for all-omni tank drive, 8 for omni-traction tank drive
 );
 
 // vertical motion controller
@@ -78,7 +92,7 @@ lemlib::ControllerSettings angularController(1, // proportional gain (kP)
 
 // sensors for odometry
 lemlib::OdomSensors sensors(&vertical, // vertical tracking wheel
-                            &vertical2, // vertical tracking wheel 2, set to nullptr as we don't have a second one
+                            nullptr, // vertical tracking wheel 2
                             &horizontal, // horizontal tracking wheel
                             nullptr, // horizontal tracking wheel 2, set to nullptr as we don't have a second one
                             &imu // inertial sensor
@@ -91,8 +105,8 @@ lemlib::ExpoDriveCurve throttleCurve(3, // joystick deadband out of 127
 );
 
 // input curve for steer input during driver control
-lemlib::ExpoDriveCurve steerCurve(3, // joystick deadband out of 127
-                                  10, // minimum output where drivetrain will move out of 127
+lemlib::ExpoDriveCurve steerCurve(3,    // joystick deadband out of 127
+                                  10,   // minimum output where drivetrain will move out of 127
                                   1.019 // expo curve gain
 );
 
@@ -105,23 +119,28 @@ lemlib::Chassis chassis(drivetrain, linearController, angularController, sensors
  * All other competition modes are blocked by initialize; it is recommended
  * to keep execution time for this mode under a few seconds.
  */
-void odom(){
+void telemetry() {
     while (true) {
         // print robot location to the brain screen
         pros::lcd::print(0, "X: %.2f", chassis.getPose().x); // x
         pros::lcd::print(1, "Y: %.2f", chassis.getPose().y); // y
-        pros::lcd::print(2, "Theta: %.2f", imu.get_heading()); // heading
+        pros::lcd::print(2, "Theta: %.2f", chassis.getPose().theta); // heading
+
+        // printing PD constants
+        pros::lcd::print(4, "thetaKp: %.2f", thetaKp); // thetaKp
+        pros::lcd::print(5, "thetaKd: %.2f", thetaKd); // thetaKd
+
         // log position telemetry
         // lemlib::telemetrySink()->info("Chassis pose: {}", chassis.getPose());
         // delay to save resources
         pros::delay(50);
+
+         
     }
 }
 void initialize() {
-    leftMotors.set_brake_mode_all(pros::E_MOTOR_BRAKE_HOLD);
-    rightMotors.set_brake_mode_all(pros::E_MOTOR_BRAKE_HOLD);
-    chassis.calibrate(); // calibrate sensors
     imu.reset();
+    chassis.calibrate(); // calibrate sensors
     if (!pros::lcd::is_initialized()) pros::lcd::initialize();
     // the default rate is 50. however, if you need to change the rate, you
     // can do the following.
@@ -132,72 +151,8 @@ void initialize() {
     // works, refer to the fmtlib docs
 
     // thread to for brain screen and position logging distance(x,y,chassis.getPose().x,chassis.getPose().y)>2.5
-    pros::Task screenTask(odom);
-}
-double update(double kp, double kd, double error, double prevError ) {
-
-    return kp*error+kd*(error-prevError);
-
-}
-double checkAngle(double aerror) {
-    if (aerror > 180) aerror -= 360;
-    else if (aerror < - 180) aerror += 360;
-    return aerror;
-}
-
-double verticalkp = 8;
-double verticalkd = 8;
-double horizontalkp=5.8;
-double horizontalkd=12;
-double thetakp=2;
-double thetakd=0;
-
-void moveforward(double x, double y, double theta, int timeout) {
-
-    double verticalError = y-chassis.getPose().y;
-    double verticalPrevError = verticalError;
-    double horizontalError = x-chassis.getPose().x;
-    double horizontalprevError = horizontalError;
-    double thetaError = checkAngle(theta-imu.get_heading());
-    double thetaprevError = thetaError;
-    double heading = imu.get_heading();
-    lemlib::Timer timer(timeout);
-    double verticalMtr, horizontalMtr, thetaMtr;
-    while(!timer.isDone()) {
-        heading = imu.get_heading();
-	if (heading > 180) heading -= 360;
-	if (heading < - 180) heading += 360;
-	    
-        verticalError = y-chassis.getPose().y;
-        verticalMtr = update(verticalkp, verticalkd, verticalError, verticalPrevError);
-
-        horizontalError = x-chassis.getPose().x;
-        horizontalMtr = update(horizontalkp, horizontalkd, horizontalError, horizontalprevError);
-
-        thetaError = checkAngle(theta-imu.get_heading());
-        thetaMtr = update(thetakp, thetakd, thetaError, thetaprevError);
-
-        double ADverticalMtr = verticalMtr * cos(heading * M_PI / 180) + horizontalMtr * sin(heading * M_PI / 180); // Adjust based off of heading
-        double ADhorizontalMtr = -verticalMtr * sin(heading * M_PI / 180) + horizontalMtr * cos(heading * M_PI / 180);
-
-        // arcadecontrolx(thetaMtr,ADverticalMtr,ADhorizontalMtr);
-
-        verticalPrevError=verticalError;
-        horizontalprevError=horizontalError;
-        thetaprevError=thetaError;
-        pros::lcd::print(5," Horizontal %.2f",horizontalMtr);
-        pros::lcd::print(6,"vertical %.2f",verticalMtr);
-        pros::lcd::print(7,"%.2f",heading);
-        pros::lcd::print(4,"error %.2f", thetaMtr);
-
-        if (fabs(verticalError) < 1 &&
-            fabs(horizontalError) < 1 &&
-            fabs(thetaError) < 1){
-            break;
-        }
-        pros::delay(20);
-    }
-    arcadecontrolx(0,0,0);
+    pros::Task screenTask(telemetry);
+    chassis.setPose(0,0,0);
 }
 
 /**
@@ -244,45 +199,19 @@ void competition_initialize() {}
     pros::lcd::print(4, "pure pursuit finished!");
  */
 
-void conveyor(int speed){
-    intake1.move(-speed);
-    intake2.move(speed);
-}
-
 void autonomous() {
-    // piston.set_value(1);
-    // moveforward(0,-18,0,1800);
-    // piston.set_value(0);
-    // pros::delay(200);
-    // conveyor(127);
-    // pros::delay(800);
-    // conveyor(0);
-    // moveforward(10,-23,90,1500);
-    // piston.set_value(1);
-    // intake.move(-127); // intake
-    // conveyor(127);
-    // moveforward(17.5,-23,90,1500);
-    // pros::delay(500);
-    // conveyor(0);
-    // pros::delay(200);
-    // intake.move(127);
-    // piston.set_value(1);
-    // moveforward(0,0,135,3000);
-    // moveforward(24,48,90,3000);
-    moveforward(0,24,0,30000);
-    // moveforward(0,0,0,300000);
-    // moveforward(0,24,0,30000);
-    // moveforward(0,-24,90,30000);
-    // moveforward(0,0,0,30000);
+    leftMotors.set_brake_mode_all(pros::E_MOTOR_BRAKE_COAST);
+    rightMotors.set_brake_mode_all(pros::E_MOTOR_BRAKE_COAST);
 
-    
+    turn90();
 }
 
 void opcontrol() {
     // controller
-    	pros::Controller master(pros::E_CONTROLLER_MASTER);
+    pros::Controller master(pros::E_CONTROLLER_MASTER);
+    bool tuningPID = false;
 
-    // loop to continuously update motors
+    // loop to continuously updatePD motors
     while (true) {
 		bool r1pressed;
       	bool r2pressed;
@@ -293,35 +222,202 @@ void opcontrol() {
 		double left = master.get_analog(ANALOG_LEFT_Y);
 	  	double right = master.get_analog(ANALOG_RIGHT_X);
 	  	double rightx = master.get_analog(ANALOG_LEFT_X);
-		arcadecontrolx(right, left, rightx);
-		if(master.get_digital(pros::E_CONTROLLER_DIGITAL_R1)) {
-           intake1.move(127);
-		   intake2.move(-127);
+		holonomicDrive(right, left, rightx);
+
+		if      (master.get_digital(pros::E_CONTROLLER_DIGITAL_R1)) 
+        {
+            intake1.move(127);
+		    intake2.move(-127);
 		    intake.move(127);
-      }else if(master.get_digital(pros::E_CONTROLLER_DIGITAL_R2)) {
+        } 
+        else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_R2)) 
+        {
 			intake1.move(-127);
-		   intake2.move(127);
+		    intake2.move(127);
 		    intake.move(-127);
 
-        }  else {
+        } 
+        else 
+        {
 			intake1.move(0);
-		   intake2.move(0);
+		    intake2.move(0);
 		    intake.move(0);
 		}
+
 		if(master.get_digital(pros::E_CONTROLLER_DIGITAL_L1)) {
-           piston.set_value(true);
+            clamp.set_value(true);
         }
-      if(master.get_digital(pros::E_CONTROLLER_DIGITAL_L2)) {
-			piston.set_value(false);
 
-        }          
-		if(master.get_digital(pros::E_CONTROLLER_DIGITAL_A)) {
+        if(master.get_digital(pros::E_CONTROLLER_DIGITAL_L2)) {
+		    clamp.set_value(false);
+
+        }
+
+		if(master.get_digital(pros::E_CONTROLLER_DIGITAL_X)) {
 			intake1.move(0);
-		   intake2.move(0);
+		    intake2.move(0);
 		    intake.move(0);
+        }
 
-        }   
+        if(master.get_digital(pros::E_CONTROLLER_DIGITAL_A)) {
+			autonomous();
+        }
+
+        if(master.get_digital(pros::E_CONTROLLER_DIGITAL_UP) && !tuningPID) {
+			redSoloAWP();
+        }
+
+        if(master.get_digital(pros::E_CONTROLLER_DIGITAL_DOWN) && !tuningPID) {
+			blueSoloAWP();
+        }
+
+        if(master.get_digital(pros::E_CONTROLLER_DIGITAL_Y) && !tuningPID) {
+			tuningPID = true;
+        } else if(master.get_digital(pros::E_CONTROLLER_DIGITAL_Y) && tuningPID) {
+			tuningPID = false;
+        }
+
+        if (tuningPID && master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_RIGHT) ) {
+            thetaKp += 0.05;
+        }
+
+        if (tuningPID && master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_LEFT) ) {
+            thetaKp -= 0.05;
+        }
+
+        if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_B)) {
+            imu.set_heading(0);
+            chassis.setPose(0,0,0);
+        }
+
 		pros::delay(20);                             
 	}
 }
 
+
+//------------------------------------------ AUTONS ------------------------------------------------------//
+
+// UTILS
+
+void conveyor(int speed){
+    intake1.move(-speed);
+    intake2.move(speed);
+}
+
+double updatePD(double Kp, double Kd, double error, double prevError) {
+    return Kp*error + Kd*(error - prevError);
+}
+
+double checkAngle(double angError) {
+    if (angError > 180) angError -= 360;
+    else if (angError < - 180) angError += 360;
+    return angError;
+}
+
+void moveTo(const double& x, const double& y, const double& theta, const int& timeout) {
+
+    double verticalError = y - chassis.getPose().y;
+    double verticalPrevError = verticalError;
+    double horizontalError = x - chassis.getPose().x;
+    double horizontalPrevError = horizontalError;
+    double thetaError = checkAngle(theta - imu.get_heading());
+    double thetaPrevError = thetaError;
+    double heading = imu.get_heading();
+
+    lemlib::Timer timer(timeout);
+    double verticalMtr, horizontalMtr, thetaMtr = 0;
+
+    while(!timer.isDone()) {
+        heading = imu.get_heading();
+	    if (heading > 180)  heading -= 360;
+	    if (heading < -180) heading += 360;
+	    
+        verticalError = y - chassis.getPose().y;
+        verticalMtr = updatePD(vertKp, vertKd, verticalError, verticalPrevError);
+
+        horizontalError = x - chassis.getPose().x;
+        horizontalMtr = updatePD(horizKp, horizKd, horizontalError, horizontalPrevError);
+
+        thetaError = checkAngle(theta-imu.get_heading());
+        thetaMtr = updatePD(thetaKp, thetaKd, thetaError, thetaPrevError);
+
+        double ADverticalMtr = verticalMtr * cos(heading * M_PI / 180) + horizontalMtr * sin(heading * M_PI / 180); // Adjust based off of heading
+        double ADhorizontalMtr = -verticalMtr * sin(heading * M_PI / 180) + horizontalMtr * cos(heading * M_PI / 180);
+
+        holonomicDrive(thetaMtr,ADverticalMtr,ADhorizontalMtr);
+
+        verticalPrevError = verticalError;
+        horizontalPrevError = horizontalError;
+        thetaPrevError = thetaError;
+        // pros::lcd::print(5," Horizontal %.2f",horizontalMtr);
+        // pros::lcd::print(6,"vertical %.2f",verticalMtr);
+        // pros::lcd::print(7,"%.2f",heading);
+        // pros::lcd::print(4,"error %.2f", thetaMtr);
+
+        if (fabs(verticalError) < 1 &&
+            fabs(horizontalError) < 1 &&
+            fabs(thetaError) < 1)
+        {
+            break;
+        }
+
+        pros::delay(20);
+    }
+
+    holonomicDrive(0,0,0);
+}
+
+// PATHS
+
+void turn90() {
+    imu.set_heading(0);
+    chassis.turnToHeading(90, 2000);
+}
+
+void redSoloAWP() {
+    imu.set_heading(270);
+    chassis.setPose(-120, 59.75, 270);
+    clamp.set_value(false);
+
+    moveTo(-104, 60, 270, 1500);
+    clamp.set_value(true);
+}
+
+void blueSoloAWP() {
+    imu.set_heading(0);
+    chassis.setPose(0, 0, 0);
+}
+
+void oldRedSoloAWP() {
+    clamp.set_value(1);
+    moveTo(0,-18,0,1800);
+    clamp.set_value(0);
+    pros::delay(200);
+    conveyor(127);
+    pros::delay(800);
+    conveyor(0);
+    moveTo(10,-23,90,1500);
+    clamp.set_value(1);
+    intake.move(-127); // intake
+    conveyor(127);
+    moveTo(17.5,-23,90,1500);
+    pros::delay(500);
+    conveyor(0);
+    pros::delay(200);
+    intake.move(127);
+    clamp.set_value(1);
+    moveTo(0,0,135,3000);
+    moveTo(24,48,90,3000);
+    moveTo(0,24,0,30000);
+    moveTo(0,0,0,300000);
+    moveTo(0,24,0,30000);
+    moveTo(0,-24,90,30000);
+    moveTo(0,0,0,30000);
+}
+
+void PDtune() {
+    imu.set_heading(0);
+    chassis.setPose(0,0,0);
+    pros::delay(20);
+    moveTo(0, 0, 90, 5000);
+}
